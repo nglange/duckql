@@ -77,6 +77,7 @@ class QueryExecutor:
                     value = value.tobytes().decode('utf-8', errors='replace')
                 elif hasattr(value, 'isoformat'):
                     value = value.isoformat()
+                # DuckDB may return dates as strings already, leave them as is
                 row_dict[col] = value
             row_dicts.append(row_dict)
         

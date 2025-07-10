@@ -2,6 +2,7 @@
 
 from .introspection import DuckDBIntrospector, TableInfo, ColumnInfo
 from .types import TypeBuilder, duckdb_to_graphql_type
+from .aggregates import AggregateTypeBuilder
 
 __all__ = [
     "DuckDBIntrospector",
@@ -9,4 +10,5 @@ __all__ = [
     "ColumnInfo",
     "TypeBuilder",
     "duckdb_to_graphql_type",
+    "AggregateTypeBuilder",
 ]

@@ -2,7 +2,7 @@
 
 import pytest
 from duckql.schema.introspection import DuckDBIntrospector, TableInfo, ColumnInfo
-from .test_database import create_test_database, create_pidgin_test_database
+from .test_database import create_test_database, create_complex_analytics_database
 
 
 class TestDuckDBIntrospector:
@@ -14,9 +14,9 @@ class TestDuckDBIntrospector:
         return create_test_database()
     
     @pytest.fixture
-    def pidgin_db(self):
-        """Create Pidgin test database."""
-        return create_pidgin_test_database()
+    def complex_db(self):
+        """Create complex analytics database."""
+        return create_complex_analytics_database()
     
     @pytest.fixture
     def introspector(self, test_db):
@@ -29,7 +29,7 @@ class TestDuckDBIntrospector:
         
         expected_tables = [
             'simple_types', 'edge_types', 'json_types', 'special_chars',
-            'parent_table', 'child_table', 'large_dataset', 'order',
+            'parent_table', 'child_table', 'wide_table', 'order',
             'numeric_precision', 'empty_table'
         ]
         
@@ -91,8 +91,8 @@ class TestDuckDBIntrospector:
         assert columns_by_name['huge_number'].data_type == 'HUGEINT'
         assert columns_by_name['tiny_number'].data_type == 'TINYINT'
         
-        # Check floating point types
-        assert columns_by_name['real_number'].data_type == 'REAL'
+        # Check floating point types (DuckDB may return FLOAT instead of REAL)
+        assert columns_by_name['real_number'].data_type in ['REAL', 'FLOAT']
         assert columns_by_name['double_number'].data_type == 'DOUBLE'
         
         # Check binary and time types
@@ -150,33 +150,27 @@ class TestDuckDBIntrospector:
         # Foreign key column should exist (though FK constraint might not be enforced)
         assert 'parent_id' in child_columns
     
-    def test_pidgin_schema_introspection(self, pidgin_db):
-        """Test introspection of full Pidgin schema."""
-        introspector = DuckDBIntrospector(pidgin_db)
+    def test_complex_schema_introspection(self, complex_db):
+        """Test introspection of complex analytics schema."""
+        introspector = DuckDBIntrospector(complex_db)
         
-        # Check all Pidgin tables exist
+        # Check table exists
         tables = introspector.get_tables()
-        pidgin_tables = [
-            'events', 'experiments', 'conversations', 'turn_metrics',
-            'messages', 'token_usage', 'context_truncations'
-        ]
+        assert 'wide_metrics' in tables
         
-        for table in pidgin_tables:
-            assert table in tables, f"Pidgin table {table} not found"
-        
-        # Check turn_metrics with ~80 columns
-        turn_metrics = introspector.get_table_info('turn_metrics')
-        assert len(turn_metrics.columns) > 70, "turn_metrics should have ~80 columns"
+        # Check wide_metrics with 50+ columns
+        wide_metrics = introspector.get_table_info('wide_metrics')
+        assert len(wide_metrics.columns) > 50, "wide_metrics should have 50+ columns"
         
         # Check composite primary key
-        assert 'conversation_id' in [col.name for col in turn_metrics.columns if col.is_primary_key]
-        assert 'turn_number' in [col.name for col in turn_metrics.columns if col.is_primary_key]
+        pk_columns = [col.name for col in wide_metrics.columns if col.is_primary_key]
+        assert 'id' in pk_columns
+        assert 'timestamp' in pk_columns
         
         # Check JSON columns exist
-        columns_by_name = {col.name: col for col in turn_metrics.columns}
-        assert columns_by_name['word_frequencies_a'].data_type == 'JSON'
-        assert columns_by_name['word_frequencies_b'].data_type == 'JSON'
-        assert columns_by_name['shared_vocabulary'].data_type == 'JSON'
+        columns_by_name = {col.name: col for col in wide_metrics.columns}
+        assert columns_by_name['properties'].data_type == 'JSON'
+        assert columns_by_name['metadata'].data_type == 'JSON'
     
     def test_numeric_precision_types(self, introspector):
         """Test all numeric type variations."""
@@ -201,9 +195,9 @@ class TestDuckDBIntrospector:
         assert columns_by_name['real_col'].data_type in ['REAL', 'FLOAT']
         assert columns_by_name['double_col'].data_type == 'DOUBLE'
         
-        # Fixed precision
+        # Fixed precision (DuckDB treats NUMERIC and DECIMAL as the same)
         assert 'DECIMAL' in columns_by_name['decimal_col'].data_type
-        assert 'NUMERIC' in columns_by_name['numeric_col'].data_type
+        assert 'DECIMAL' in columns_by_name['numeric_col'].data_type  # DuckDB converts NUMERIC to DECIMAL
     
     def test_empty_table(self, introspector):
         """Test introspection of empty table."""

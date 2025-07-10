@@ -54,11 +54,9 @@ def create_test_database() -> duckdb.DuckDBPyConnection:
             empty_json JSON,
             null_json JSON,
             array_json JSON,
-            -- Arrays
             int_array INTEGER[],
             string_array VARCHAR[],
-            -- Mixed content
-            mixed_data JSON
+            complex_json JSON
         )
     """)
     
@@ -70,17 +68,21 @@ def create_test_database() -> duckdb.DuckDBPyConnection:
             text_with_quotes VARCHAR,
             text_with_semicolon VARCHAR,
             text_with_newlines VARCHAR,
+            text_with_tabs VARCHAR,
             text_with_unicode VARCHAR,
-            text_with_injection VARCHAR,
-            sql_keyword_name VARCHAR  -- Column named after SQL keyword
+            text_with_emojis VARCHAR,
+            sql_injection_attempt VARCHAR,
+            markdown_text TEXT,
+            html_text TEXT
         )
     """)
     
-    # Table 5: Relationships and foreign keys
+    # Table 5: Parent-child relationship
     conn.execute("""
         CREATE TABLE parent_table (
             parent_id INTEGER PRIMARY KEY,
-            parent_name VARCHAR NOT NULL
+            parent_name VARCHAR NOT NULL,
+            parent_value DECIMAL(10, 2)
         )
     """)
     
@@ -89,14 +91,21 @@ def create_test_database() -> duckdb.DuckDBPyConnection:
             child_id INTEGER PRIMARY KEY,
             parent_id INTEGER,
             child_name VARCHAR,
+            child_order INTEGER,
             FOREIGN KEY (parent_id) REFERENCES parent_table(parent_id)
         )
     """)
     
-    # Table 6: Large dataset for performance testing
+    # Table 6: Wide table (many columns)
     conn.execute("""
-        CREATE TABLE large_dataset (
+        CREATE TABLE wide_table (
             id INTEGER PRIMARY KEY,
+            col_001 VARCHAR, col_002 VARCHAR, col_003 VARCHAR, col_004 VARCHAR, col_005 VARCHAR,
+            col_006 INTEGER, col_007 INTEGER, col_008 INTEGER, col_009 INTEGER, col_010 INTEGER,
+            col_011 DECIMAL(10,2), col_012 DECIMAL(10,2), col_013 DECIMAL(10,2), col_014 DECIMAL(10,2), col_015 DECIMAL(10,2),
+            col_016 BOOLEAN, col_017 BOOLEAN, col_018 BOOLEAN, col_019 BOOLEAN, col_020 BOOLEAN,
+            col_021 DATE, col_022 DATE, col_023 DATE, col_024 DATE, col_025 DATE,
+            col_026 TIMESTAMP, col_027 TIMESTAMP, col_028 TIMESTAMP, col_029 TIMESTAMP, col_030 TIMESTAMP,
             category VARCHAR,
             value DOUBLE,
             timestamp TIMESTAMP,
@@ -177,7 +186,7 @@ def create_test_database() -> duckdb.DuckDBPyConnection:
          'binary'::BLOB, '13:45:30', INTERVAL '1 year 2 months 3 days 4 hours 5 minutes',
          NULL, '', 0, false),
         (-9223372036854775808, -170141183460469231731687303715884105727, -128, -0.0, 1.7976931348623157e+308,
-         '\x00\x01\x02\x03'::BLOB, '00:00:00', INTERVAL '-1 day',
+         '\\x00\\x01\\x02\\x03'::BLOB, '00:00:00', INTERVAL '-1 day',
          NULL, '', 0, false)
     """)
     
@@ -187,7 +196,7 @@ def create_test_database() -> duckdb.DuckDBPyConnection:
         (1, '{"key": "value"}', '{"meta": true}', '{"nested": {"deep": {"value": 42}}}', 
          '{}', NULL, '[1, 2, 3]', ARRAY[1, 2, 3], ARRAY['a', 'b', 'c'],
          '{"string": "text", "number": 123, "bool": true, "null": null, "array": [1, 2], "object": {}}'),
-        (2, '{"special": "quote\"s and \\backslash"}', '{"unicode": "émojis 🦆"}', 
+        (2, '{"special": "quote\\"s and \\\\backslash"}', '{"unicode": "émojis 🦆"}', 
          '{"sql": "SELECT * FROM users; DROP TABLE users;--"}',
          '{}', NULL, '[]', ARRAY[]::INTEGER[], ARRAY[]::VARCHAR[],
          '{"deeply": {"nested": {"structure": {"with": {"many": {"levels": {"value": "deep"}}}}}}}')
@@ -196,38 +205,71 @@ def create_test_database() -> duckdb.DuckDBPyConnection:
     # Special characters data
     conn.execute("""
         INSERT INTO special_chars VALUES
-        (1, 'Normal text', 'Text with "quotes"', 'Text with; semicolon', 
-         E'Text with\nnewlines\nand\ttabs', 'Unicode: 你好世界 🌍', 
-         'Robert''); DROP TABLE students;--', 'SELECT'),
-        (2, 'Simple', 'O''Reilly', 'Semi;colon;separated', 
-         E'Line 1\nLine 2\nLine 3', '∑∏∫≈≠∞', 
-         '1 OR 1=1', 'FROM'),
-        (3, '<script>alert("XSS")</script>', '{"json": "with \\"quotes\\""}', 
-         'UNION SELECT * FROM passwords', E'\r\n\r\n', '🦆🦆🦆', 
-         '\'; DELETE FROM users WHERE ''t''=''t', 'WHERE')
+        (1, 'Normal text', 'Text with "quotes"', 'Text with; semicolon',
+         E'Text with\\nnewlines', E'Text with\\ttabs', 'Unicode: 你好世界 🌍',
+         'Emojis: 😀🎉🦆💻', 'Robert''); DROP TABLE students;--',
+         '# Markdown\\n\\n- List item\\n- Another item\\n\\n**Bold** and *italic*',
+         '<h1>HTML</h1><p>Paragraph with <a href="#">link</a></p>'),
+        (2, 'Another normal', E'It''s a single quote', 'Semi;colon;delimited;data',
+         E'Line 1\\nLine 2\\nLine 3', E'Col1\\tCol2\\tCol3', 'Ελληνικά Greek',
+         '🏃‍♂️🏃‍♀️ Running people', '"; DELETE FROM users WHERE 1=1;--',
+         '## Heading 2\\n\\nCode block:\\n```python\\nprint("hello")\\n```',
+         '<script>alert("XSS")</script><img src=x onerror=alert(1)>')
     """)
     
     # Parent-child data
     conn.execute("""
         INSERT INTO parent_table VALUES
-        (1, 'Parent One'),
-        (2, 'Parent Two'),
-        (3, 'Parent Three')
+        (1, 'Parent One', 100.00),
+        (2, 'Parent Two', 200.00),
+        (3, 'Parent Three', 300.00)
     """)
     
     conn.execute("""
         INSERT INTO child_table VALUES
-        (1, 1, 'Child 1-1'),
-        (2, 1, 'Child 1-2'),
-        (3, 2, 'Child 2-1'),
-        (4, NULL, 'Orphan Child')
+        (1, 1, 'Child 1-1', 1),
+        (2, 1, 'Child 1-2', 2),
+        (3, 2, 'Child 2-1', 1),
+        (4, 3, 'Child 3-1', 1),
+        (5, 3, 'Child 3-2', 2),
+        (6, 3, 'Child 3-3', 3)
     """)
     
-    # Large dataset (1000 rows)
+    # Wide table - using generate_series for bulk data
     conn.execute("""
-        INSERT INTO large_dataset
+        INSERT INTO wide_table 
         SELECT 
             row_number() OVER () as id,
+            'value_' || (row_number() OVER () % 5) as col_001,
+            'data_' || (row_number() OVER () % 3) as col_002,
+            'text_' || (row_number() OVER () % 7) as col_003,
+            'info_' || (row_number() OVER () % 2) as col_004,
+            'desc_' || (row_number() OVER () % 4) as col_005,
+            row_number() OVER () % 100 as col_006,
+            row_number() OVER () % 200 as col_007,
+            row_number() OVER () % 300 as col_008,
+            row_number() OVER () % 400 as col_009,
+            row_number() OVER () % 500 as col_010,
+            (row_number() OVER () % 1000) * 1.5 as col_011,
+            (row_number() OVER () % 2000) * 2.5 as col_012,
+            (row_number() OVER () % 3000) * 3.5 as col_013,
+            (row_number() OVER () % 4000) * 4.5 as col_014,
+            (row_number() OVER () % 5000) * 5.5 as col_015,
+            (row_number() OVER () % 2) = 0 as col_016,
+            (row_number() OVER () % 3) = 0 as col_017,
+            (row_number() OVER () % 4) = 0 as col_018,
+            (row_number() OVER () % 5) = 0 as col_019,
+            (row_number() OVER () % 6) = 0 as col_020,
+            DATE '2024-01-01' + INTERVAL (row_number() OVER () % 30) DAY as col_021,
+            DATE '2024-02-01' + INTERVAL (row_number() OVER () % 28) DAY as col_022,
+            DATE '2024-03-01' + INTERVAL (row_number() OVER () % 31) DAY as col_023,
+            DATE '2024-04-01' + INTERVAL (row_number() OVER () % 30) DAY as col_024,
+            DATE '2024-05-01' + INTERVAL (row_number() OVER () % 31) DAY as col_025,
+            TIMESTAMP '2024-01-01 00:00:00' + INTERVAL (row_number() OVER ()) HOUR as col_026,
+            TIMESTAMP '2024-01-01 00:00:00' + INTERVAL (row_number() OVER ()) MINUTE as col_027,
+            TIMESTAMP '2024-01-01 00:00:00' + INTERVAL (row_number() OVER ()) SECOND as col_028,
+            TIMESTAMP '2024-01-01 00:00:00' + INTERVAL (row_number() OVER () * 2) HOUR as col_029,
+            TIMESTAMP '2024-01-01 00:00:00' + INTERVAL (row_number() OVER () * 3) MINUTE as col_030,
             CASE (row_number() OVER ()) % 5
                 WHEN 0 THEN 'category_a'
                 WHEN 1 THEN 'category_b'
@@ -306,138 +348,117 @@ def create_test_database() -> duckdb.DuckDBPyConnection:
     return conn
 
 
-def create_pidgin_test_database() -> duckdb.DuckDBPyConnection:
-    """Create a test database with the full Pidgin schema."""
+def create_ecommerce_database() -> duckdb.DuckDBPyConnection:
+    """Create a test database with e-commerce schema."""
     conn = duckdb.connect(":memory:")
     
-    # Use the actual Pidgin schema
-    from pidgin_schema import get_all_schemas
+    # Create schema
+    from .example_schemas import ECOMMERCE_SCHEMA, get_ecommerce_test_data
+    conn.execute(ECOMMERCE_SCHEMA)
     
-    # Create all tables
-    for schema_sql in get_all_schemas():
-        conn.execute(schema_sql)
-    
-    # Insert realistic test data
-    
-    # Experiments
-    conn.execute("""
-        INSERT INTO experiments VALUES
-        ('exp_test_001', 'Edge Case Testing', '2024-01-01 10:00:00'::TIMESTAMP, 
-         '2024-01-01 10:05:00'::TIMESTAMP, '2024-01-01 12:00:00'::TIMESTAMP, 'completed',
-         '{"models": ["gpt-4", "claude-3"], "temperature": 0.7, "max_turns": 50}'::JSON,
-         100, 95, 5,
-         '{"researcher": "Dr. Test", "purpose": "system validation"}'::JSON),
-        ('exp_null_test', 'Null Value Experiment', '2024-01-02 10:00:00'::TIMESTAMP,
-         NULL, NULL, 'created',
-         NULL, 0, 0, 0, NULL)
-    """)
-    
-    # Conversations with various edge cases
-    conn.execute("""
-        INSERT INTO conversations VALUES
-        ('conv_normal_001', 'exp_test_001', '2024-01-01 10:10:00'::TIMESTAMP,
-         '2024-01-01 10:10:30'::TIMESTAMP, '2024-01-01 10:15:00'::TIMESTAMP, 'completed',
-         'gpt-4', 'openai', 0.7, 'Alice',
-         'claude-3-opus', 'anthropic', 0.7, 'Bob',
-         'Hello, let''s have a conversation!', 50, 'agent_a',
-         45, 0.92, 'High convergence achieved', 270000,
-         NULL, NULL, NULL, false),
-        ('conv_error_001', 'exp_test_001', '2024-01-01 10:20:00'::TIMESTAMP,
-         '2024-01-01 10:20:30'::TIMESTAMP, NULL, 'failed',
-         'gpt-4', 'openai', 0.9, NULL,
-         'claude-3-opus', 'anthropic', 0.9, NULL,
-         'Test error handling', 50, 'agent_b',
-         5, NULL, NULL, 30000,
-         'Context length exceeded', 'context_overflow', '2024-01-01 10:21:00'::TIMESTAMP, true)
-    """)
-    
-    # Turn metrics with all ~80 columns
-    conn.execute("""
-        INSERT INTO turn_metrics VALUES
-        ('conv_normal_001', 1, '2024-01-01 10:10:35'::TIMESTAMP,
-         -- Convergence metrics
-         0.45, 0.30, 0.25, 0.40, 0.35,
-         0.30, 0.15, 0.20, 0.18, 0.19,
-         -- Agent A message metrics (23 fields)
-         150, 25, 20, 0.80, 5.2, 500,
-         2, 1, 12.5, 1, 0, 3, 2, 1,
-         4.5, 0.85, 0.75, 0.15, 0.05, 0.03, 0.65, true, 20,
-         -- Agent A linguistic markers (7 fields)
-         2, 1, 0, 3, 2, 0, 1,
-         -- Agent B message metrics (23 fields)
-         145, 24, 19, 0.79, 5.1, 480,
-         2, 1, 12.0, 0, 1, 2, 1, 2,
-         4.4, 0.84, 0.74, 0.14, 0.04, 0.02, 0.64, true, 19,
-         -- Agent B linguistic markers (7 fields)
-         1, 2, 0, 2, 1, 1, 2,
-         -- JSON fields
-         '{"hello": 2, "world": 1, "how": 1, "are": 1}'::JSON,
-         '{"hello": 1, "hi": 1, "there": 1, "how": 1}'::JSON,
-         '["hello", "how"]'::JSON,
-         -- Timing
-         '2024-01-01 10:10:30'::TIMESTAMP, '2024-01-01 10:10:35'::TIMESTAMP, 5000)
-    """)
-    
-    # Messages
-    conn.execute("""
-        INSERT INTO messages VALUES
-        ('conv_normal_001', 1, 'agent_a', 
-         'Hello! How are you today? I''m excited to have this conversation.', 
-         '2024-01-01 10:10:35'::TIMESTAMP, 15, 15),
-        ('conv_normal_001', 1, 'agent_b',
-         'Hi there! I''m doing well, thank you. I''m also looking forward to our chat.',
-         '2024-01-01 10:10:35'::TIMESTAMP, 16, 16)
-    """)
-    
-    # Events with JSON data
-    conn.execute("""
-        INSERT INTO events VALUES
-        (gen_random_uuid(), '2024-01-01 10:00:00'::TIMESTAMP, 'experiment_started',
-         NULL, 'exp_test_001', 
-         '{"action": "start", "config": {"temperature": 0.7}}'::JSON,
-         '2024-01-01'::DATE, 1),
-        (gen_random_uuid(), '2024-01-01 10:10:30'::TIMESTAMP, 'conversation_started',
-         'conv_normal_001', 'exp_test_001',
-         '{"agents": ["gpt-4", "claude-3-opus"]}'::JSON,
-         '2024-01-01'::DATE, 2)
-    """)
-    
-    # Token usage
-    conn.execute("""
-        INSERT INTO token_usage VALUES
-        (gen_random_uuid(), '2024-01-01 10:10:35'::TIMESTAMP, 'conv_normal_001',
-         'openai', 'gpt-4',
-         100, 15, 115,
-         3000, 150000, 0.001, 0.001,
-         0.30, 0.03, 0.33)
-    """)
-    
-    # Context truncations
-    conn.execute("""
-        INSERT INTO context_truncations VALUES
-        ('conv_error_001', 'exp_test_001', 'agent_a', 5, 3, '2024-01-01 10:21:00'::TIMESTAMP)
-    """)
+    # Insert test data
+    for sql in get_ecommerce_test_data():
+        conn.execute(sql)
     
     return conn
 
 
-if __name__ == "__main__":
-    # Create test databases
-    print("Creating comprehensive test database...")
-    test_db = create_test_database()
+def create_analytics_database() -> duckdb.DuckDBPyConnection:
+    """Create a test database with analytics schema."""
+    conn = duckdb.connect(":memory:")
     
-    print("Creating Pidgin test database...")
-    pidgin_db = create_pidgin_test_database()
+    # Create schema
+    from .example_schemas import ANALYTICS_SCHEMA, get_analytics_test_data
+    conn.execute(ANALYTICS_SCHEMA)
     
-    print("Test databases created successfully!")
+    # Insert test data
+    for sql in get_analytics_test_data():
+        conn.execute(sql)
     
-    # Quick verification
-    print("\nTest database tables:")
-    tables = test_db.execute("SHOW TABLES").fetchall()
-    for table in tables:
-        print(f"  - {table[0]}")
+    return conn
+
+
+def create_financial_database() -> duckdb.DuckDBPyConnection:
+    """Create a test database with financial schema."""
+    conn = duckdb.connect(":memory:")
     
-    print("\nPidgin database tables:")
-    tables = pidgin_db.execute("SHOW TABLES").fetchall()
-    for table in tables:
-        print(f"  - {table[0]}")
+    # Create schema
+    from .example_schemas import FINANCIAL_SCHEMA, get_financial_test_data
+    conn.execute(FINANCIAL_SCHEMA)
+    
+    # Insert test data
+    for sql in get_financial_test_data():
+        conn.execute(sql)
+    
+    return conn
+
+
+def create_complex_analytics_database() -> duckdb.DuckDBPyConnection:
+    """Create a test database with complex analytics schema for stress testing."""
+    conn = duckdb.connect(":memory:")
+    
+    # Create a wide table similar to the problematic schema
+    conn.execute("""
+        CREATE TABLE wide_metrics (
+            id INTEGER,
+            timestamp TIMESTAMP,
+            -- 50+ metric columns to test performance
+            metric_001 DOUBLE, metric_002 DOUBLE, metric_003 DOUBLE, metric_004 DOUBLE, metric_005 DOUBLE,
+            metric_006 DOUBLE, metric_007 DOUBLE, metric_008 DOUBLE, metric_009 DOUBLE, metric_010 DOUBLE,
+            metric_011 DOUBLE, metric_012 DOUBLE, metric_013 DOUBLE, metric_014 DOUBLE, metric_015 DOUBLE,
+            metric_016 DOUBLE, metric_017 DOUBLE, metric_018 DOUBLE, metric_019 DOUBLE, metric_020 DOUBLE,
+            metric_021 DOUBLE, metric_022 DOUBLE, metric_023 DOUBLE, metric_024 DOUBLE, metric_025 DOUBLE,
+            metric_026 DOUBLE, metric_027 DOUBLE, metric_028 DOUBLE, metric_029 DOUBLE, metric_030 DOUBLE,
+            metric_031 DOUBLE, metric_032 DOUBLE, metric_033 DOUBLE, metric_034 DOUBLE, metric_035 DOUBLE,
+            metric_036 DOUBLE, metric_037 DOUBLE, metric_038 DOUBLE, metric_039 DOUBLE, metric_040 DOUBLE,
+            metric_041 DOUBLE, metric_042 DOUBLE, metric_043 DOUBLE, metric_044 DOUBLE, metric_045 DOUBLE,
+            metric_046 DOUBLE, metric_047 DOUBLE, metric_048 DOUBLE, metric_049 DOUBLE, metric_050 DOUBLE,
+            -- Dimension columns
+            category VARCHAR,
+            subcategory VARCHAR,
+            region VARCHAR,
+            -- JSON columns for flexibility
+            properties JSON,
+            metadata JSON,
+            PRIMARY KEY (id, timestamp)
+        )
+    """)
+    
+    # Insert some test data
+    conn.execute("""
+        INSERT INTO wide_metrics
+        SELECT
+            row_number() OVER () as id,
+            TIMESTAMP '2024-01-01 00:00:00' + INTERVAL (row_number() OVER ()) MINUTE as timestamp,
+            -- Generate 50 metric values
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            random() * 100, random() * 100, random() * 100, random() * 100, random() * 100,
+            -- Dimensions
+            CASE (row_number() OVER ()) % 5
+                WHEN 0 THEN 'Electronics'
+                WHEN 1 THEN 'Clothing'
+                WHEN 2 THEN 'Food'
+                WHEN 3 THEN 'Books'
+                ELSE 'Other'
+            END as category,
+            'Sub_' || ((row_number() OVER ()) % 10) as subcategory,
+            CASE (row_number() OVER ()) % 4
+                WHEN 0 THEN 'North America'
+                WHEN 1 THEN 'Europe'
+                WHEN 2 THEN 'Asia'
+                ELSE 'Other'
+            END as region,
+            json_object('source', 'sensor_' || ((row_number() OVER ()) % 20)) as properties,
+            json_object('version', '1.0', 'processed', true) as metadata
+        FROM generate_series(1, 100)
+    """)
+    
+    return conn

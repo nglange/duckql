@@ -4,10 +4,15 @@ from typing import Dict, Any, Optional, List, Type
 import strawberry
 from strawberry import field
 from strawberry.scalars import JSON
-from datetime import datetime, date
+# Date/time types are handled as strings since DuckDB returns them as ISO strings
 from decimal import Decimal
 import uuid
 from enum import Enum
+
+# Create OrderDirection enum once
+OrderDirection = strawberry.enum(
+    Enum("OrderDirection", {"ASC": "ASC", "DESC": "DESC"})
+)
 
 from .introspection import TableInfo, ColumnInfo
 
@@ -45,12 +50,12 @@ DUCKDB_TYPE_MAP = {
     'CHAR': str,
     'BPCHAR': str,
     
-    # Date/Time types
-    'DATE': date,
-    'TIMESTAMP': datetime,
-    'TIMESTAMP WITHOUT TIME ZONE': datetime,
-    'TIMESTAMP WITH TIME ZONE': datetime,
-    'TIMESTAMPTZ': datetime,
+    # Date/Time types  
+    'DATE': str,  # DuckDB returns dates as strings
+    'TIMESTAMP': str,  # DuckDB returns timestamps as strings
+    'TIMESTAMP WITHOUT TIME ZONE': str,
+    'TIMESTAMP WITH TIME ZONE': str,
+    'TIMESTAMPTZ': str,
     'TIME': str,  # GraphQL doesn't have native time type
     'INTERVAL': str,  # Store as string
     
@@ -60,7 +65,6 @@ DUCKDB_TYPE_MAP = {
     
     # JSON
     'JSON': JSON,
-    'JSONB': JSON,
     
     # UUID
     'UUID': str,  # GraphQL doesn't have native UUID
@@ -117,13 +121,22 @@ class TypeBuilder:
             field_type = duckdb_to_graphql_type(column.data_type, column.is_nullable)
             annotations[field_name] = field_type
         
-        # Create the type dynamically
-        graphql_type = type(type_name, (), {
-            '__annotations__': annotations,
-        })
+        # Create the type dynamically with default values
+        class_dict = {'__annotations__': annotations}
+        
+        # Add default values for all fields to handle partial selection
+        for field_name in annotations.keys():
+            class_dict[field_name] = None
+            
+        graphql_type = type(type_name, (), class_dict)
         
         # Apply strawberry decorator
         graphql_type = strawberry.type(graphql_type)
+        
+        # Override field names to preserve original database column names
+        for field_def in graphql_type.__strawberry_definition__.fields:
+            # Preserve the original field name instead of converting to camelCase
+            field_def.graphql_name = field_def.python_name
         
         # Store for reuse
         self._types[type_name] = graphql_type
@@ -171,7 +184,8 @@ class TypeBuilder:
                 annotations[f"{field_name}"] = Optional[base_type]
                 annotations[f"{field_name}_eq"] = Optional[base_type]
                 annotations[f"{field_name}_ne"] = Optional[base_type]
-            elif base_type in (datetime, date):
+            elif column.data_type in ('DATE', 'TIMESTAMP', 'TIMESTAMP WITHOUT TIME ZONE', 'TIMESTAMP WITH TIME ZONE', 'TIMESTAMPTZ'):
+                # Date/time fields get comparison operators
                 annotations[f"{field_name}"] = Optional[base_type]
                 annotations[f"{field_name}_eq"] = Optional[base_type]
                 annotations[f"{field_name}_ne"] = Optional[base_type]
@@ -184,26 +198,28 @@ class TypeBuilder:
                 annotations[f"{field_name}"] = Optional[base_type]
                 annotations[f"{field_name}_eq"] = Optional[base_type]
         
-        # Add logical operators
-        annotations["_and"] = Optional[List["TypePlaceholder"]]
-        annotations["_or"] = Optional[List["TypePlaceholder"]]
-        annotations["_not"] = Optional["TypePlaceholder"]
+        # Create a unique class for each filter type with annotations and defaults
+        class_dict = {'__annotations__': annotations}
         
-        # Create the filter type
-        filter_type = type(type_name, (), {
-            '__annotations__': annotations,
-        })
+        # Add default values for all fields
+        for field_name in annotations.keys():
+            class_dict[field_name] = None
+            
+        filter_class = type(type_name, (), class_dict)
         
         # Apply strawberry decorator
-        filter_type = strawberry.input(filter_type)
+        filter_class = strawberry.input(filter_class)
         
-        # Fix forward references
-        filter_type.__annotations__["_and"] = Optional[List[filter_type]]
-        filter_type.__annotations__["_or"] = Optional[List[filter_type]]
-        filter_type.__annotations__["_not"] = Optional[filter_type]
+        # Override field names to preserve original database column names
+        for field_def in filter_class.__strawberry_definition__.fields:
+            # Preserve the original field name instead of converting to camelCase
+            field_def.graphql_name = field_def.python_name
         
-        self._filter_types[type_name] = filter_type
-        return filter_type
+        # TODO: Add logical operators (_and, _or, _not) with self-reference
+        # This is complex with Strawberry's type system
+        
+        self._filter_types[type_name] = filter_class
+        return filter_class
     
     def _build_order_by_type(self, table_info: TableInfo) -> Type:
         """Build an order by input type."""
@@ -212,10 +228,6 @@ class TypeBuilder:
         if type_name in self._order_by_types:
             return self._order_by_types[type_name]
         
-        # Create order direction enum
-        OrderDirection = strawberry.enum(
-            Enum("OrderDirection", {"ASC": "ASC", "DESC": "DESC"})
-        )
         
         # Build order by fields
         annotations = {}
@@ -223,13 +235,22 @@ class TypeBuilder:
             field_name = self._to_field_name(column.name)
             annotations[field_name] = Optional[OrderDirection]
         
-        # Create the order by type
-        order_by_type = type(type_name, (), {
-            '__annotations__': annotations,
-        })
+        # Create the order by type with default values
+        class_dict = {'__annotations__': annotations}
+        
+        # Add default values for all fields
+        for field_name in annotations.keys():
+            class_dict[field_name] = None
+            
+        order_by_type = type(type_name, (), class_dict)
         
         # Apply strawberry decorator
         order_by_type = strawberry.input(order_by_type)
+        
+        # Override field names to preserve original database column names
+        for field_def in order_by_type.__strawberry_definition__.fields:
+            # Preserve the original field name instead of converting to camelCase
+            field_def.graphql_name = field_def.python_name
         
         self._order_by_types[type_name] = order_by_type
         return order_by_type
@@ -263,6 +284,17 @@ class TypeBuilder:
     
     @staticmethod
     def _to_field_name(column_name: str) -> str:
-        """Convert column name to GraphQL field name."""
-        # Already in snake_case, which is fine for GraphQL
-        return column_name
+        """Convert column name to valid GraphQL field name."""
+        # Replace invalid characters
+        field_name = column_name.replace('-', '_').replace(' ', '_')
+        
+        # Handle names that start with numbers
+        if field_name and field_name[0].isdigit():
+            field_name = f"field_{field_name}"
+        
+        # Handle Python reserved words
+        import keyword
+        if keyword.iskeyword(field_name):
+            field_name = f"{field_name}_"
+        
+        return field_name

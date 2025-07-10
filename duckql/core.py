@@ -7,7 +7,7 @@ from strawberry.fastapi import GraphQLRouter
 from fastapi import FastAPI
 import uvicorn
 
-from .schema import DuckDBIntrospector, TypeBuilder
+from .schema import DuckDBIntrospector, TypeBuilder, AggregateTypeBuilder
 from .execution import GraphQLToSQLTranslator, QueryExecutor
 
 
@@ -18,6 +18,7 @@ class DuckQL:
         self.connection = connection
         self.introspector = DuckDBIntrospector(connection)
         self.type_builder = TypeBuilder()
+        self.aggregate_builder = AggregateTypeBuilder(self.type_builder)
         self.executor = QueryExecutor(connection)
         self.translator = GraphQLToSQLTranslator()
         
@@ -47,20 +48,23 @@ class DuckQL:
         
         for table_name, graphql_type in graphql_types.items():
             # Single item query
-            single_field_name = self._to_camel_case(table_name)
+            single_field_name = self._to_camel_case(table_name[:-1] if table_name.endswith('s') else table_name)
             query_fields[single_field_name] = self._create_single_resolver(
                 table_name, graphql_type
             )
             
-            # List query
-            list_field_name = self._to_camel_case(table_name) + "s"
+            # List query (use the original table name in camelCase)
+            list_field_name = self._to_camel_case(table_name)
             query_fields[list_field_name] = self._create_list_resolver(
                 table_name, graphql_type
             )
             
             # Aggregate query
             aggregate_field_name = self._to_camel_case(table_name) + "Aggregate"
-            # TODO: Create aggregate type and resolver
+            table_info = self.introspector.get_table_info(table_name)
+            query_fields[aggregate_field_name] = self.aggregate_builder.create_aggregate_resolver(
+                table_name, table_info, self.executor, self.translator
+            )
         
         # Add custom resolvers
         query_fields.update(self._custom_resolvers)
@@ -227,7 +231,12 @@ class DuckQL:
         if field.selection_set:
             for selection in field.selection_set.selections:
                 if hasattr(selection, 'name'):
-                    selections.append(selection.name.value)
+                    field_name = selection.name.value
+                    # Map GraphQL field name back to database column name
+                    # Handle Python keywords that were converted (e.g. from_ -> from)
+                    if field_name.endswith('_') and field_name[:-1] in ['from', 'class', 'import', 'return', 'def', 'for', 'while', 'if', 'else', 'elif', 'try', 'except', 'finally', 'with', 'as', 'yield', 'lambda', 'pass', 'break', 'continue']:
+                        field_name = field_name[:-1]
+                    selections.append(field_name)
         
         # If no selections, select all
         if not selections:
@@ -243,11 +252,15 @@ class DuckQL:
         result = {}
         for key, value in vars(input_obj).items():
             if value is not None:
-                if hasattr(value, '__dict__'):
+                # Handle enums
+                from enum import Enum
+                if isinstance(value, Enum):
+                    result[key] = value.value
+                elif hasattr(value, '__dict__') and not isinstance(value, (str, int, float, bool)):
                     result[key] = self._input_to_dict(value)
                 elif isinstance(value, list):
                     result[key] = [
-                        self._input_to_dict(item) if hasattr(item, '__dict__') else item
+                        self._input_to_dict(item) if hasattr(item, '__dict__') and not isinstance(item, (str, int, float, bool, Enum)) else item
                         for item in value
                     ]
                 else:
@@ -257,8 +270,20 @@ class DuckQL:
     
     def _dict_to_type(self, data: Dict[str, Any], graphql_type: Type) -> Any:
         """Convert dict to GraphQL type instance."""
-        # Create instance with data
-        instance = graphql_type(**data)
+        # Map database column names to GraphQL field names
+        # Handle Python keywords that need underscore suffix
+        import keyword
+        
+        mapped_data = {}
+        for key, value in data.items():
+            if keyword.iskeyword(key):
+                mapped_key = f"{key}_"
+            else:
+                mapped_key = key
+            mapped_data[mapped_key] = value
+        
+        # Create instance with mapped data
+        instance = graphql_type(**mapped_data)
         
         # Apply computed fields if any
         type_name = graphql_type.__name__

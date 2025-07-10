@@ -65,6 +65,26 @@ class GraphQLToSQLTranslator:
         
         return sql, context.params
     
+    def translate_where(self, where: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+        """Translate just the WHERE clause conditions."""
+        context = QueryContext(
+            table_name="",  # Not needed for WHERE only
+            selections=[],
+            where_conditions=[],
+            order_by=[],
+        )
+        
+        # Reset param counter
+        self.param_counter = 0
+        
+        # Build WHERE conditions
+        self._build_where_conditions(where, context)
+        
+        # Join conditions
+        where_sql = " AND ".join(context.where_conditions) if context.where_conditions else ""
+        
+        return where_sql, context.params
+    
     def _build_where_conditions(self, where: Dict[str, Any], context: QueryContext) -> None:
         """Build WHERE conditions from GraphQL filter."""
         for key, value in where.items():
@@ -129,18 +149,18 @@ class GraphQLToSQLTranslator:
         
         # Check for operators at the end
         if len(parts) > 1:
-            last_part = parts[-1]
-            if last_part in ["eq", "ne", "gt", "gte", "lt", "lte", "like", "ilike", "in", "not"]:
-                if last_part == "not" and len(parts) > 2 and parts[-2] == "in":
-                    # Handle not_in
-                    field_name = "_".join(parts[:-2])
-                    operator = "not_in"
-                else:
+            # Check for not_in operator first
+            if len(parts) >= 2 and "_".join(parts[-2:]) == "not_in":
+                field_name = "_".join(parts[:-2])
+                operator = "not_in"
+            else:
+                last_part = parts[-1]
+                if last_part in ["eq", "ne", "gt", "gte", "lt", "lte", "like", "ilike", "in"]:
                     field_name = "_".join(parts[:-1])
                     operator = last_part
-            else:
-                field_name = key
-                operator = "eq"
+                else:
+                    field_name = key
+                    operator = "eq"
         else:
             field_name = key
             operator = "eq"
@@ -150,23 +170,24 @@ class GraphQLToSQLTranslator:
         self.param_counter += 1
         context.params[param_name] = value
         
-        # Build condition based on operator
+        # Build condition based on operator (quote field names)
+        quoted_field = f'"{field_name}"'
         if operator == "eq" or operator == "":
-            condition = f"{field_name} = ${param_name}"
+            condition = f"{quoted_field} = ${param_name}"
         elif operator == "ne":
-            condition = f"{field_name} != ${param_name}"
+            condition = f"{quoted_field} != ${param_name}"
         elif operator == "gt":
-            condition = f"{field_name} > ${param_name}"
+            condition = f"{quoted_field} > ${param_name}"
         elif operator == "gte":
-            condition = f"{field_name} >= ${param_name}"
+            condition = f"{quoted_field} >= ${param_name}"
         elif operator == "lt":
-            condition = f"{field_name} < ${param_name}"
+            condition = f"{quoted_field} < ${param_name}"
         elif operator == "lte":
-            condition = f"{field_name} <= ${param_name}"
+            condition = f"{quoted_field} <= ${param_name}"
         elif operator == "like":
-            condition = f"{field_name} LIKE ${param_name}"
+            condition = f"{quoted_field} LIKE ${param_name}"
         elif operator == "ilike":
-            condition = f"{field_name} ILIKE ${param_name}"
+            condition = f"{quoted_field} ILIKE ${param_name}"
         elif operator == "in":
             if isinstance(value, list):
                 placeholders = []
@@ -175,9 +196,9 @@ class GraphQLToSQLTranslator:
                     self.param_counter += 1
                     context.params[p] = v
                     placeholders.append(f"${p}")
-                condition = f"{field_name} IN ({', '.join(placeholders)})"
+                condition = f"{quoted_field} IN ({', '.join(placeholders)})"
             else:
-                condition = f"{field_name} = ${param_name}"
+                condition = f"{quoted_field} = ${param_name}"
         elif operator == "not_in":
             if isinstance(value, list):
                 placeholders = []
@@ -186,12 +207,12 @@ class GraphQLToSQLTranslator:
                     self.param_counter += 1
                     context.params[p] = v
                     placeholders.append(f"${p}")
-                condition = f"{field_name} NOT IN ({', '.join(placeholders)})"
+                condition = f"{quoted_field} NOT IN ({', '.join(placeholders)})"
             else:
-                condition = f"{field_name} != ${param_name}"
+                condition = f"{quoted_field} != ${param_name}"
         else:
             # Default to equality
-            condition = f"{field_name} = ${param_name}"
+            condition = f"{quoted_field} = ${param_name}"
         
         context.where_conditions.append(condition)
     
@@ -203,12 +224,16 @@ class GraphQLToSQLTranslator:
         # Add columns
         if context.selections:
             for col in context.selections:
-                query = query.select(col)
+                # Quote column names to handle reserved words
+                if col != '*':
+                    query = query.select(f'"{col}"')
+                else:
+                    query = query.select(col)
         else:
             query = query.select("*")
         
-        # Add FROM
-        query = query.from_(context.table_name)
+        # Add FROM (quote table name)
+        query = query.from_(f'"{context.table_name}"')
         
         # Add WHERE conditions
         if context.where_conditions:
@@ -217,10 +242,10 @@ class GraphQLToSQLTranslator:
             # Parse the where clause safely
             query = query.where(where_clause)
         
-        # Add ORDER BY
+        # Add ORDER BY (quote field names)
         if context.order_by:
             for field, direction in context.order_by:
-                query = query.order_by(f"{field} {direction}")
+                query = query.order_by(f'"{field}" {direction}')
         
         # Add LIMIT
         if context.limit is not None:
