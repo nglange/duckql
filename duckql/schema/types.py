@@ -1,0 +1,268 @@
+"""GraphQL type generation from DuckDB schema."""
+
+from typing import Dict, Any, Optional, List, Type
+import strawberry
+from strawberry import field
+from strawberry.scalars import JSON
+from datetime import datetime, date
+from decimal import Decimal
+import uuid
+from enum import Enum
+
+from .introspection import TableInfo, ColumnInfo
+
+
+# Type mapping from DuckDB to Python/GraphQL types
+DUCKDB_TYPE_MAP = {
+    # Numeric types
+    'BIGINT': int,
+    'INTEGER': int,
+    'INT': int,
+    'SMALLINT': int,
+    'TINYINT': int,
+    'UBIGINT': int,
+    'UINTEGER': int,
+    'USMALLINT': int,
+    'UTINYINT': int,
+    'HUGEINT': int,
+    'UHUGEINT': int,
+    
+    # Floating point
+    'DOUBLE': float,
+    'REAL': float,
+    'FLOAT': float,
+    'DECIMAL': Decimal,
+    'NUMERIC': Decimal,
+    
+    # Boolean
+    'BOOLEAN': bool,
+    'BOOL': bool,
+    
+    # String types
+    'VARCHAR': str,
+    'TEXT': str,
+    'STRING': str,
+    'CHAR': str,
+    'BPCHAR': str,
+    
+    # Date/Time types
+    'DATE': date,
+    'TIMESTAMP': datetime,
+    'TIMESTAMP WITHOUT TIME ZONE': datetime,
+    'TIMESTAMP WITH TIME ZONE': datetime,
+    'TIMESTAMPTZ': datetime,
+    'TIME': str,  # GraphQL doesn't have native time type
+    'INTERVAL': str,  # Store as string
+    
+    # Binary
+    'BLOB': str,  # Base64 encoded
+    'BYTEA': str,
+    
+    # JSON
+    'JSON': JSON,
+    'JSONB': JSON,
+    
+    # UUID
+    'UUID': str,  # GraphQL doesn't have native UUID
+    
+    # Arrays - handled separately
+    # STRUCT/MAP - handled as JSON
+}
+
+
+def duckdb_to_graphql_type(duckdb_type: str, is_nullable: bool = True) -> Any:
+    """Convert DuckDB type to GraphQL type."""
+    # Clean up type string
+    base_type = duckdb_type.upper().strip()
+    
+    # Handle array types
+    if base_type.endswith('[]'):
+        element_type = base_type[:-2]
+        inner_type = duckdb_to_graphql_type(element_type, False)
+        return Optional[List[inner_type]] if is_nullable else List[inner_type]
+    
+    # Handle parameterized types
+    if '(' in base_type:
+        base_type = base_type.split('(')[0]
+    
+    # Map to Python type
+    python_type = DUCKDB_TYPE_MAP.get(base_type, JSON)
+    
+    # Wrap in Optional if nullable
+    return Optional[python_type] if is_nullable else python_type
+
+
+class TypeBuilder:
+    """Builds GraphQL types from database schema."""
+    
+    def __init__(self):
+        self._types: Dict[str, Type] = {}
+        self._filter_types: Dict[str, Type] = {}
+        self._order_by_types: Dict[str, Type] = {}
+        self._computed_fields: Dict[str, Dict[str, Any]] = {}
+    
+    def build_type(self, table_info: TableInfo) -> Type:
+        """Build a GraphQL type from table information."""
+        # Convert table name to PascalCase
+        type_name = self._to_pascal_case(table_info.name)
+        
+        # Check if already built
+        if type_name in self._types:
+            return self._types[type_name]
+        
+        # Build field annotations
+        annotations = {}
+        for column in table_info.columns:
+            field_name = self._to_field_name(column.name)
+            field_type = duckdb_to_graphql_type(column.data_type, column.is_nullable)
+            annotations[field_name] = field_type
+        
+        # Create the type dynamically
+        graphql_type = type(type_name, (), {
+            '__annotations__': annotations,
+        })
+        
+        # Apply strawberry decorator
+        graphql_type = strawberry.type(graphql_type)
+        
+        # Store for reuse
+        self._types[type_name] = graphql_type
+        
+        # Also build filter and order by types
+        self._build_filter_type(table_info)
+        self._build_order_by_type(table_info)
+        
+        return graphql_type
+    
+    def _build_filter_type(self, table_info: TableInfo) -> Type:
+        """Build a filter input type for WHERE clauses."""
+        type_name = f"{self._to_pascal_case(table_info.name)}Filter"
+        
+        if type_name in self._filter_types:
+            return self._filter_types[type_name]
+        
+        # Build filter fields
+        annotations = {}
+        
+        for column in table_info.columns:
+            field_name = self._to_field_name(column.name)
+            base_type = duckdb_to_graphql_type(column.data_type, False)
+            
+            # Add comparison operators based on type
+            if base_type in (int, float, Decimal):
+                annotations[f"{field_name}"] = Optional[base_type]
+                annotations[f"{field_name}_eq"] = Optional[base_type]
+                annotations[f"{field_name}_ne"] = Optional[base_type]
+                annotations[f"{field_name}_gt"] = Optional[base_type]
+                annotations[f"{field_name}_gte"] = Optional[base_type]
+                annotations[f"{field_name}_lt"] = Optional[base_type]
+                annotations[f"{field_name}_lte"] = Optional[base_type]
+                annotations[f"{field_name}_in"] = Optional[List[base_type]]
+                annotations[f"{field_name}_not_in"] = Optional[List[base_type]]
+            elif base_type == str:
+                annotations[f"{field_name}"] = Optional[base_type]
+                annotations[f"{field_name}_eq"] = Optional[base_type]
+                annotations[f"{field_name}_ne"] = Optional[base_type]
+                annotations[f"{field_name}_like"] = Optional[base_type]
+                annotations[f"{field_name}_ilike"] = Optional[base_type]
+                annotations[f"{field_name}_in"] = Optional[List[base_type]]
+                annotations[f"{field_name}_not_in"] = Optional[List[base_type]]
+            elif base_type == bool:
+                annotations[f"{field_name}"] = Optional[base_type]
+                annotations[f"{field_name}_eq"] = Optional[base_type]
+                annotations[f"{field_name}_ne"] = Optional[base_type]
+            elif base_type in (datetime, date):
+                annotations[f"{field_name}"] = Optional[base_type]
+                annotations[f"{field_name}_eq"] = Optional[base_type]
+                annotations[f"{field_name}_ne"] = Optional[base_type]
+                annotations[f"{field_name}_gt"] = Optional[base_type]
+                annotations[f"{field_name}_gte"] = Optional[base_type]
+                annotations[f"{field_name}_lt"] = Optional[base_type]
+                annotations[f"{field_name}_lte"] = Optional[base_type]
+            else:
+                # Default: equality only
+                annotations[f"{field_name}"] = Optional[base_type]
+                annotations[f"{field_name}_eq"] = Optional[base_type]
+        
+        # Add logical operators
+        annotations["_and"] = Optional[List["TypePlaceholder"]]
+        annotations["_or"] = Optional[List["TypePlaceholder"]]
+        annotations["_not"] = Optional["TypePlaceholder"]
+        
+        # Create the filter type
+        filter_type = type(type_name, (), {
+            '__annotations__': annotations,
+        })
+        
+        # Apply strawberry decorator
+        filter_type = strawberry.input(filter_type)
+        
+        # Fix forward references
+        filter_type.__annotations__["_and"] = Optional[List[filter_type]]
+        filter_type.__annotations__["_or"] = Optional[List[filter_type]]
+        filter_type.__annotations__["_not"] = Optional[filter_type]
+        
+        self._filter_types[type_name] = filter_type
+        return filter_type
+    
+    def _build_order_by_type(self, table_info: TableInfo) -> Type:
+        """Build an order by input type."""
+        type_name = f"{self._to_pascal_case(table_info.name)}OrderBy"
+        
+        if type_name in self._order_by_types:
+            return self._order_by_types[type_name]
+        
+        # Create order direction enum
+        OrderDirection = strawberry.enum(
+            Enum("OrderDirection", {"ASC": "ASC", "DESC": "DESC"})
+        )
+        
+        # Build order by fields
+        annotations = {}
+        for column in table_info.columns:
+            field_name = self._to_field_name(column.name)
+            annotations[field_name] = Optional[OrderDirection]
+        
+        # Create the order by type
+        order_by_type = type(type_name, (), {
+            '__annotations__': annotations,
+        })
+        
+        # Apply strawberry decorator
+        order_by_type = strawberry.input(order_by_type)
+        
+        self._order_by_types[type_name] = order_by_type
+        return order_by_type
+    
+    def get_filter_type(self, table_name: str) -> Optional[Type]:
+        """Get the filter type for a table."""
+        type_name = f"{self._to_pascal_case(table_name)}Filter"
+        return self._filter_types.get(type_name)
+    
+    def get_order_by_type(self, table_name: str) -> Optional[Type]:
+        """Get the order by type for a table."""
+        type_name = f"{self._to_pascal_case(table_name)}OrderBy"
+        return self._order_by_types.get(type_name)
+    
+    def add_computed_field(self, table_name: str, field_name: str, resolver: Any) -> None:
+        """Add a computed field to a type."""
+        type_name = self._to_pascal_case(table_name)
+        if type_name not in self._computed_fields:
+            self._computed_fields[type_name] = {}
+        self._computed_fields[type_name][field_name] = resolver
+    
+    def get_computed_fields(self, table_name: str) -> Dict[str, Any]:
+        """Get computed fields for a table."""
+        type_name = self._to_pascal_case(table_name)
+        return self._computed_fields.get(type_name, {})
+    
+    @staticmethod
+    def _to_pascal_case(snake_str: str) -> str:
+        """Convert snake_case to PascalCase."""
+        return ''.join(word.capitalize() for word in snake_str.split('_'))
+    
+    @staticmethod
+    def _to_field_name(column_name: str) -> str:
+        """Convert column name to GraphQL field name."""
+        # Already in snake_case, which is fine for GraphQL
+        return column_name
