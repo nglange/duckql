@@ -237,7 +237,8 @@ class TestTypeBuilder:
         assert 'is_available' in annotations
         assert 'is_available_eq' in annotations
         
-        # TODO: Logical operators (_and, _or, _not) not yet implemented
+        # Note: Logical operators (_and, _or, _not) work in queries but are not
+        # exposed in the GraphQL schema due to self-referential type limitations
         # assert '_and' in annotations
         # assert '_or' in annotations
         # assert '_not' in annotations

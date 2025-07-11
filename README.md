@@ -12,7 +12,10 @@ DuckQL automatically generates a fully-featured GraphQL API from your DuckDB dat
 - 🔄 **Real-time Schema**: Automatically discovers tables, columns, and relationships
 - 🎯 **Type Safety**: Automatic type mapping from DuckDB to GraphQL with proper nullability
 - ⚡ **Async Execution**: Non-blocking query execution with connection pooling
+- 🔁 **Automatic Retries**: Built-in retry logic for transient errors
 - 🧩 **Extensible**: Add computed fields and custom resolvers for complex analytics
+- 📝 **Rich Error Messages**: Detailed errors with suggestions and correlation IDs
+- 📊 **Query Logging**: Configurable query logging and performance tracking
 - 🌐 **Web-Ready**: Built-in GraphQL playground for exploring your API
 
 ## Installation
@@ -28,6 +31,12 @@ pip install duckql
 ```bash
 # Start GraphQL server for your DuckDB database
 duckql serve analytics.db
+
+# With query logging and custom port
+duckql serve analytics.db --port 3000 --log-queries
+
+# With slow query detection (logs queries over 500ms)
+duckql serve analytics.db --log-slow-queries --slow-query-ms 500
 
 # View available tables
 duckql tables analytics.db
@@ -47,8 +56,16 @@ import duckdb
 # Connect to your database
 conn = duckdb.connect("analytics.db")
 
-# Create GraphQL API
-server = DuckQL(conn)
+# Create GraphQL API with configuration
+server = DuckQL(
+    conn,
+    max_workers=8,           # Thread pool size for query execution
+    max_retries=3,           # Retry attempts for transient errors
+    retry_delay=0.1,         # Initial retry delay in seconds
+    log_queries=True,        # Log all SQL queries
+    log_slow_queries=True,   # Log queries exceeding threshold
+    slow_query_ms=1000       # Slow query threshold (1 second)
+)
 
 # Start server
 server.serve(port=8000)
@@ -231,8 +248,20 @@ def customer_lifetime_days(obj) -> int:
 Create complex analytical queries:
 
 ```python
-@server.resolver("top_selling_products") 
-async def top_selling_products(root, info, limit: int = 10, days: int = 30) -> list:
+import strawberry
+from typing import List, Optional
+
+# Define the result type
+@strawberry.type
+class TopProduct:
+    name: str
+    category: str
+    units_sold: int
+    total_revenue: float
+
+# Add custom resolver
+@server.resolver("topSellingProducts") 
+async def top_selling_products(root, info, limit: int = 10, days: int = 30) -> List[TopProduct]:
     sql = f"""
         SELECT 
             p.name,
@@ -247,7 +276,29 @@ async def top_selling_products(root, info, limit: int = 10, days: int = 30) -> l
         LIMIT {limit}
     """
     result = await server.executor.execute_query(sql)
-    return result.rows
+    
+    return [
+        TopProduct(
+            name=row['name'],
+            category=row['category'],
+            units_sold=row['units_sold'],
+            total_revenue=row['total_revenue']
+        )
+        for row in result.rows
+    ]
+```
+
+Now query it:
+
+```graphql
+query {
+  topSellingProducts(days: 7, limit: 5) {
+    name
+    category
+    unitsSold
+    totalRevenue
+  }
+}
 ```
 
 ## Type Mappings
@@ -298,26 +349,150 @@ CMD ["duckql", "serve", "/data/analytics.db", "--host", "0.0.0.0"]
 ```python
 server = DuckQL(
     connection=conn,
-    max_workers=8,  # Thread pool size
-    enable_playground=False,  # Disable GraphiQL in production
+    max_workers=8,             # Thread pool size
+    max_retries=3,             # Retry attempts for transient errors
+    retry_delay=0.1,           # Initial retry delay
+    retry_backoff=2.0,         # Exponential backoff multiplier
+    log_queries=False,         # Disable query logging in production
+    log_slow_queries=True,     # Log only slow queries
+    slow_query_ms=2000,        # 2 second threshold
+    enable_metrics=True,       # Enable metrics collection
+    metrics_history_size=10000 # Keep last 10k queries in memory
 )
 
 server.serve(
     host="0.0.0.0",
     port=8000,
-    debug=False
+    debug=False  # Disable GraphQL playground in production
 )
+```
+
+### Retry Configuration
+
+DuckQL includes automatic retry logic for transient errors:
+
+```python
+from duckql import DuckQL
+
+server = DuckQL(
+    connection=conn,
+    max_retries=3,        # Number of retry attempts (default: 3)
+    retry_delay=0.1,      # Initial delay between retries in seconds (default: 0.1)
+    retry_backoff=2.0,    # Exponential backoff multiplier (default: 2.0)
+)
+```
+
+The retry logic handles:
+- Connection timeouts
+- Temporary database locks
+- Network issues
+- Connection pool exhaustion
+
+Non-retryable errors (like SQL syntax errors) fail immediately without retries.
+
+### Metrics and Monitoring
+
+DuckQL includes built-in metrics collection for monitoring query performance:
+
+```python
+from duckql import DuckQL
+
+# Enable metrics collection
+server = DuckQL(
+    connection=conn,
+    enable_metrics=True,      # Enable metrics (default: True)
+    metrics_history_size=10000  # Keep last 10k queries (default: 10000)
+)
+
+# Get metrics report
+print(server.get_metrics_report(format='console'))  # Human-readable
+print(server.get_metrics_report(format='json'))     # JSON format
+print(server.get_metrics_report(format='prometheus'))  # Prometheus format
+
+# Get raw statistics
+stats = server.get_stats()
+print(f"Total queries: {stats['metrics']['summary']['total_queries']}")
+print(f"Error rate: {stats['metrics']['summary']['error_rate']:.1%}")
+print(f"P95 latency: {stats['metrics']['durations_ms']['p95']:.2f}ms")
+
+# Reset statistics
+server.reset_stats()
+```
+
+#### Metrics Server
+
+Expose metrics via HTTP endpoints:
+
+```bash
+# Start DuckQL with metrics endpoint
+duckql serve database.db --enable-metrics --metrics-port 9090
+
+# Access metrics
+curl http://localhost:9090/metrics          # Prometheus format
+curl http://localhost:9090/metrics/json     # JSON format
+```
+
+#### Available Metrics
+
+- **Query counts**: Total, by operation type, by table
+- **Error tracking**: Total errors, error rate, errors by table
+- **Performance**: Min/max/mean/median/P95/P99 query duration
+- **Throughput**: Queries per second, rows returned
+- **Slow queries**: Queries exceeding threshold with details
+- **Cache statistics**: Hit rate for connection pooling
+
+## Error Handling
+
+DuckQL provides rich error messages with helpful context:
+
+```python
+try:
+    result = await server.executor.execute_query(sql)
+except DuckQLError as e:
+    print(f"Error: {e.message}")
+    print(f"Error Code: {e.error_code}")
+    print(f"Context: {e.context}")
+    print(f"Suggestions: {e.suggestions}")
+    print(f"Correlation ID: {e.correlation_id}")
+```
+
+Error types include:
+- `SchemaError`: Table or column not found
+- `QueryError`: SQL execution errors
+- `ConnectionError`: Database connection issues
+- `ValidationError`: GraphQL validation errors
+- `FilterError`: Invalid filter conditions
+
+## Performance Monitoring
+
+Track query performance and statistics:
+
+```python
+# Get query statistics
+stats = server.get_stats()
+print(f"Total queries: {stats['query_count']}")
+print(f"Average query time: {stats['average_query_time_ms']}ms")
+print(f"Total query time: {stats['total_query_time_ms']}ms")
+
+# Reset statistics
+server.reset_stats()
 ```
 
 ## Roadmap
 
+- [x] Query retry logic with exponential backoff
+- [x] Enhanced error messages with suggestions
+- [x] Query logging and performance tracking
+- [x] Computed fields
+- [x] Custom resolvers
+- [ ] Query depth limiting
 - [ ] Relationship traversal (foreign key navigation)
 - [ ] Mutations for INSERT/UPDATE/DELETE
 - [ ] Subscriptions for real-time updates
 - [ ] Authentication and authorization
-- [ ] Query depth limiting
 - [ ] DataLoader pattern for N+1 prevention
 - [ ] Schema customization options
+- [ ] Query result caching
 
 ## Development
 

@@ -1,6 +1,6 @@
 """GraphQL type generation from DuckDB schema."""
 
-from typing import Dict, Any, Optional, List, Type
+from typing import Dict, Any, Optional, List, Type, Callable
 import strawberry
 from strawberry import field
 from strawberry.scalars import JSON
@@ -105,6 +105,16 @@ class TypeBuilder:
         self._order_by_types: Dict[str, Type] = {}
         self._computed_fields: Dict[str, Dict[str, Any]] = {}
     
+    def register_computed_field(self, table_name: str, field_name: str, field_type: Type, resolver: Callable) -> None:
+        """Register a computed field for a table."""
+        type_name = self._to_pascal_case(table_name)
+        if type_name not in self._computed_fields:
+            self._computed_fields[type_name] = {}
+        self._computed_fields[type_name][field_name] = {
+            'type': field_type,
+            'resolver': resolver
+        }
+    
     def build_type(self, table_info: TableInfo) -> Type:
         """Build a GraphQL type from table information."""
         # Convert table name to PascalCase
@@ -124,9 +134,32 @@ class TypeBuilder:
         # Create the type dynamically with default values
         class_dict = {'__annotations__': annotations}
         
-        # Add default values for all fields to handle partial selection
+        # Add default values for all database fields to handle partial selection
         for field_name in annotations.keys():
             class_dict[field_name] = None
+        
+        # Add computed fields with strawberry field resolvers
+        if type_name in self._computed_fields:
+            for field_name, field_info in self._computed_fields[type_name].items():
+                # Create a resolver that calls the user's function
+                resolver_func = field_info['resolver']
+                field_type = field_info['type']
+                
+                # Create a wrapper that gets the parent object data
+                def make_resolver(func, all_fields):
+                    def resolver(self) -> field_type:
+                        # Get all the data from the instance, including all DB fields
+                        data = {}
+                        for k in all_fields:
+                            if hasattr(self, k):
+                                data[k] = getattr(self, k)
+                        return func(data)
+                    return resolver
+                
+                # Add the field with resolver - pass annotations.keys() as list to avoid closure issue
+                class_dict[field_name] = strawberry.field(resolver=make_resolver(resolver_func, list(annotations.keys())))
+                # Also add to annotations for type checking
+                annotations[field_name] = field_type
             
         graphql_type = type(type_name, (), class_dict)
         
@@ -215,8 +248,9 @@ class TypeBuilder:
             # Preserve the original field name instead of converting to camelCase
             field_def.graphql_name = field_def.python_name
         
-        # TODO: Add logical operators (_and, _or, _not) with self-reference
-        # This is complex with Strawberry's type system
+        # Note: Logical operators (_and, _or, _not) are handled by the translator
+        # but not exposed in the GraphQL schema due to Strawberry's limitations
+        # with self-referential types in input objects
         
         self._filter_types[type_name] = filter_class
         return filter_class
